@@ -1,5 +1,5 @@
 name: "Saját Hangrögzítő"
-description: "Webes hangrögzítő"
+description: "Működő webes hangrögzítő"
 version: "1.0.0"
 slug: "audio_recorder"
 init: false

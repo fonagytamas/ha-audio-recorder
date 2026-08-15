@@ -1,7 +1,7 @@
-name: "Saját Hangrögzítő"
-description: "Működő webes hangrögzítő"
-version: "1.0.0"
-slug: "audio_recorder"
+name: Sajat Hangrogzito
+description: Webes hangrogzito
+version: 1.0.0
+slug: audio_recorder
 init: false
 arch:
   - aarch64
@@ -11,5 +11,5 @@ arch:
   - i386
 ingress: true
 ingress_port: 8099
-panel_title: "Hangrögzítő"
-panel_icon: "mdi:microphone"
+panel_title: Hangrogzito
+panel_icon: mdi:microphone

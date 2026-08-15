@@ -1,6 +1,6 @@
 name: Sajat Hangrogzito
-description: Webes hangrogzito
-version: 1.0.2
+description: Szerver oldali mikrofon rogzito
+version: 2.0.0
 slug: audio_recorder
 init: false
 arch:
@@ -9,6 +9,8 @@ arch:
   - armhf
   - armv7
   - i386
+audio: true
+full_access: true
 map:
   - config:rw
 ingress: true

@@ -1,6 +1,6 @@
 name: Sajat Hangrogzito
 description: Webes hangrogzito
-version: 1.0.0
+version: 1.0.2
 slug: audio_recorder
 init: false
 arch:
@@ -9,6 +9,8 @@ arch:
   - armhf
   - armv7
   - i386
+map:
+  - config:rw
 ingress: true
 ingress_port: 8099
 panel_title: Hangrogzito

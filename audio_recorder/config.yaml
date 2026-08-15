@@ -1,1 +1,15 @@
-
+name: "Saját Hangrögzítő"
+description: "Működő webes hangrögzítő"
+version: "1.0.0"
+slug: "audio_recorder"
+init: false
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+ingress: true
+ingress_port: 8099
+panel_title: "Hangrögzítő"
+panel_icon: "mdi:microphone"

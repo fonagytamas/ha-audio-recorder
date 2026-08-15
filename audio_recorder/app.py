@@ -6,7 +6,7 @@ from flask_sock import Sock
 app = Flask(__name__)
 sock = Sock(app)
 
-SAVE_DIR = "/media/recordings"
+SAVE_DIR = "/config/www/recordings"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 HTML_CODE = """

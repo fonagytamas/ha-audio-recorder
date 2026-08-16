@@ -1,6 +1,7 @@
 import os
 import time
 import subprocess
+import threading
 from datetime import datetime
 from flask import Flask, render_template_string, jsonify, request, send_from_directory
 
@@ -20,7 +21,6 @@ recording_process = None
 current_wav_file = None
 recording_start_time = None
 last_processed_file = None
-last_error_log = ""
 
 HTML_CODE = """
 <!DOCTYPE html>
@@ -31,7 +31,7 @@ HTML_CODE = """
     <title>JARVIS Education</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #111b21; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px 0; }
-        .card { background: #202c33; padding: 25px; border-radius: 12px; text-align: center; width: 360px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        .card { background: #202c33; padding: 25px; border-radius: 12px; text-align: center; width: 340px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
         h3 { margin-top: 0; color: #00a884; letter-spacing: 1px; }
         .control-group { margin: 12px 0; text-align: left; background: #111b21; padding: 12px; border-radius: 8px; }
         label { font-size: 13px; color: #8696a0; display: block; margin-bottom: 5px; }
@@ -43,11 +43,10 @@ HTML_CODE = """
         #recBtn { background: #00a884; color: white; }
         #stopBtn { background: #ea4335; color: white; }
         button:disabled { opacity: 0.3; cursor: not-allowed; }
-        #status { margin-top: 12px; font-size: 13px; color: #aebac1; word-break: break-word; min-height: 24px; }
+        #status { margin-top: 15px; font-size: 13px; color: #aebac1; word-break: break-word; min-height: 36px; }
         #timer { font-size: 14px; font-weight: bold; color: #ea4335; margin-top: 5px; display: none; }
         .player-box { margin-top: 15px; background: #111b21; padding: 12px; border-radius: 8px; text-align: left; display: none; }
         audio { width: 100%; margin-top: 8px; height: 35px; }
-        #logBox { font-size: 11px; color: #ff6b6b; margin-top: 10px; text-align: left; white-space: pre-wrap; word-break: break-all; }
     </style>
 </head>
 <body>
@@ -55,8 +54,8 @@ HTML_CODE = """
     <h3>JARVIS Education</h3>
     
     <div class="control-group">
-        <label>Hangerő kiemelés (Gain) <span class="slider-val" id="gainVal">+15 dB</span></label>
-        <input type="range" id="gainBoost" min="0" max="30" value="15" oninput="document.getElementById('gainVal').innerText = '+' + this.value + ' dB'">
+        <label>Hangerő kiemelés (Gain Boost) <span class="slider-val" id="gainVal">+10 dB</span></label>
+        <input type="range" id="gainBoost" min="0" max="24" value="10" oninput="document.getElementById('gainVal').innerText = '+' + this.value + ' dB'">
     </div>
 
     <div class="control-group">
@@ -74,8 +73,8 @@ HTML_CODE = """
     <div class="control-group">
         <label>Kimeneti formátum</label>
         <select id="formatSelect">
-            <option value="mp3">MP3 (Tömörített)</option>
-            <option value="wav">WAV (Eredeti)</option>
+            <option value="mp3">MP3 (Tömörített - kis méret)</option>
+            <option value="wav">WAV (Eredeti - nagy méret)</option>
         </select>
     </div>
 
@@ -86,11 +85,9 @@ HTML_CODE = """
     <div id="status">Készenlétben</div>
 
     <div class="player-box" id="playerBox">
-        <label style="color:#00a884; font-weight:bold;">Azonnali Teszt Lejátszás:</label>
+        <label style="color:#00a884; font-weight:bold; font-size:12px;">Legutóbbi felvétel:</label>
         <audio id="audioPlayer" controls></audio>
     </div>
-
-    <div id="logBox"></div>
 </div>
 
 <script>
@@ -112,7 +109,7 @@ HTML_CODE = """
 
     async function checkStatus() {
         try {
-            const res = await fetch('./status');
+            const res = await fetch('status');
             const data = await res.json();
             
             if (data.is_recording) {
@@ -129,41 +126,29 @@ HTML_CODE = """
                 document.getElementById('timer').style.display = "none";
                 document.getElementById('recBtn').disabled = false;
                 document.getElementById('stopBtn').disabled = true;
-                
                 if (!document.getElementById('status').innerText.includes("💾") && 
                     !document.getElementById('status').innerText.includes("⏳")) {
                     document.getElementById('status').innerText = "Készenlétben";
                 }
             }
-
-            if (data.last_error) {
-                document.getElementById('logBox').innerText = "Hiba:\n" + data.last_error;
-            }
         } catch (err) {
-            console.error("Státusz hiba", err);
+            console.error("Státusz ellenőrzési hiba", err);
         }
     }
 
     async function startRec() {
-        document.getElementById('recBtn').disabled = true;
         document.getElementById('status').innerText = "⏳ Indítás...";
         document.getElementById('playerBox').style.display = "none";
-        document.getElementById('logBox').innerText = "";
-        
         try {
-            const res = await fetch('./start', { method: 'POST' });
+            const res = await fetch('start', { method: 'POST' });
             const data = await res.json();
             if (data.status === 'ok') {
                 checkStatus();
             } else {
-                document.getElementById('status').innerText = "❌ Hiba történt!";
-                document.getElementById('logBox').innerText = data.message || "Ismeretlen hiba";
-                document.getElementById('recBtn').disabled = false;
+                document.getElementById('status').innerText = "❌ Hiba: " + data.message;
             }
         } catch (err) {
             document.getElementById('status').innerText = "❌ Hálózati hiba!";
-            document.getElementById('logBox').innerText = err.toString();
-            document.getElementById('recBtn').disabled = false;
         }
     }
 
@@ -180,15 +165,15 @@ HTML_CODE = """
         };
 
         try {
-            const res = await fetch('./stop', {
+            const res = await fetch('stop', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
             const data = await res.json();
             if (data.status === 'stopped') {
-                document.getElementById('status').innerText = "💾 Feldolgozás befejezve!";
-                loadPlayer();
+                document.getElementById('status').innerText = "💾 Mentve! (" + payload.format.toUpperCase() + ")";
+                setTimeout(loadPlayer, 2000);
             } else {
                 document.getElementById('status').innerText = "⚠️ Leállítva.";
             }
@@ -201,13 +186,12 @@ HTML_CODE = """
 
     async function loadPlayer() {
         try {
-            const res = await fetch('./latest');
+            const res = await fetch('latest');
             const data = await res.json();
             if (data.file) {
                 const player = document.getElementById('audioPlayer');
-                player.src = "./recordings_file/" + data.file + "?t=" + new Date().getTime();
+                player.src = "recordings_file/" + data.file + "?t=" + new Date().getTime();
                 document.getElementById('playerBox').style.display = "block";
-                document.getElementById('status').innerText = "💾 Mentve! Hallgasd meg alább:";
             }
         } catch (e) {
             console.error("Lejátszó hiba", e);
@@ -222,7 +206,7 @@ HTML_CODE = """
 """
 
 def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_format):
-    global last_processed_file, last_error_log
+    global last_processed_file
     if not os.path.exists(wav_path):
         return
 
@@ -239,34 +223,31 @@ def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_forma
         lp = int(12000 - (strength / 100.0) * 8000)
         filters.append(f"highpass=f={hp}")
         filters.append(f"lowpass=f={lp}")
-        nr = int(12 + (strength / 100.0) * 28)
-        filters.append(f"afftdn=nr={nr}:nf=-40")
 
     filters.append("compand=attacks=0.02:decays=0.2:points=-80/-80|-45/-20|-10/-6|0/0")
-    filters.append("loudnorm=I=-14:TP=-1.0:LRA=11")
+    filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
 
     filter_str = ",".join(filters)
-    temp_output = os.path.join(SAVE_DIR, f"proc_{int(time.time())}.{output_format}")
 
     cmd = ["ffmpeg", "-y", "-i", wav_path, "-af", filter_str]
 
     if output_format == "mp3":
-        cmd.extend(["-b:a", "128k", temp_output])
+        cmd.extend(["-b:a", "128k", output_path])
     else:
-        cmd.append(temp_output)
+        temp_wav = os.path.join(SAVE_DIR, f"clean_{os.path.basename(wav_path)}")
+        cmd.append(temp_wav)
 
     try:
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
-        last_error_log = ""
-
-        if os.path.exists(temp_output):
-            os.replace(temp_output, output_path)
-            if output_path != wav_path and os.path.exists(wav_path):
+        subprocess.run(cmd, capture_output=True, check=True)
+        if output_format == "wav" and os.path.exists(temp_wav):
+            os.replace(temp_wav, wav_path)
+        elif output_format == "mp3" and os.path.exists(output_path):
+            if os.path.exists(wav_path):
                 os.remove(wav_path)
-
+        
         last_processed_file = output_filename
-    except subprocess.CalledProcessError as e:
-        last_error_log = e.stderr if e.stderr else str(e)
+    except Exception as e:
+        print(f"FFmpeg feldolgozási hiba: {e}")
         last_processed_file = os.path.basename(wav_path)
 
 @app.route('/')
@@ -285,58 +266,53 @@ def get_latest():
 
 @app.route('/status', methods=['GET'])
 def get_status():
-    global recording_process, recording_start_time, last_error_log
+    global recording_process, recording_start_time
     is_recording = recording_process is not None and recording_process.poll() is None
     return jsonify({
         "is_recording": is_recording,
-        "start_time": recording_start_time if is_recording else None,
-        "last_error": last_error_log
+        "start_time": recording_start_time if is_recording else None
     })
 
 @app.route('/start', methods=['POST'])
 def start_recording():
-    global recording_process, current_wav_file, recording_start_time, last_error_log
+    global recording_process, current_wav_file, recording_start_time
     ensure_dir_exists()
-    last_error_log = ""
 
-    if recording_process is not None and recording_process.poll() is None:
+    if recording_process is None or recording_process.poll() is not None:
+        now_str = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        current_wav_file = os.path.join(SAVE_DIR, f"rec_{now_str}.wav")
+        recording_start_time = int(time.time())
+
+        cmd = ["arecord", "-D", "plughw:0,0", "-f", "S16_LE", "-r", "44100", "-c", "1", current_wav_file]
         try:
-            recording_process.kill()
-        except Exception:
-            pass
-        recording_process = None
+            recording_process = subprocess.Popen(cmd, stderr=subprocess.PIPE)
+            time.sleep(0.5)
+            
+            if recording_process.poll() is not None:
+                cmd_fb = ["arecord", "-f", "S16_LE", "-r", "44100", "-c", "1", current_wav_file]
+                recording_process = subprocess.Popen(cmd_fb, stderr=subprocess.PIPE)
+                time.sleep(0.5)
+                
+                if recording_process.poll() is not None:
+                    _, err_fb = recording_process.communicate()
+                    recording_process = None
+                    recording_start_time = None
+                    return jsonify({"status": "error", "message": err_fb.decode('utf-8', errors='ignore')})
 
-    now_str = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    current_wav_file = os.path.join(SAVE_DIR, f"rec_{now_str}.wav")
-    recording_start_time = int(time.time())
-
-    cmd = ["arecord", "-f", "S16_LE", "-r", "44100", "-c", "1", current_wav_file]
-    
-    try:
-        recording_process = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
-        time.sleep(0.3)
-        
-        if recording_process.poll() is not None:
-            _, err = recording_process.communicate()
-            err_text = err.decode('utf-8', errors='ignore') if err else "Ismeretlen arecord hiba"
+            return jsonify({"status": "ok"})
+        except Exception as e:
             recording_process = None
             recording_start_time = None
-            last_error_log = err_text
-            return jsonify({"status": "error", "message": err_text})
+            return jsonify({"status": "error", "message": str(e)})
 
-        return jsonify({"status": "ok"})
-    except Exception as e:
-        recording_process = None
-        recording_start_time = None
-        last_error_log = str(e)
-        return jsonify({"status": "error", "message": str(e)})
+    return jsonify({"status": "already_running"})
 
 @app.route('/stop', methods=['POST'])
 def stop_recording():
     global recording_process, current_wav_file, recording_start_time
     data = request.get_json() or {}
     
-    gain = data.get('gain', 15)
+    gain = data.get('gain', 10)
     filter_enabled = data.get('filter', True)
     strength = data.get('strength', 50)
     output_format = data.get('format', 'mp3')
@@ -352,7 +328,10 @@ def stop_recording():
         recording_start_time = None
 
         if current_wav_file and os.path.exists(current_wav_file):
-            process_audio_file(current_wav_file, gain, filter_enabled, strength, output_format)
+            threading.Thread(
+                target=process_audio_file,
+                args=(current_wav_file, gain, filter_enabled, strength, output_format)
+            ).start()
 
         return jsonify({"status": "stopped"})
 

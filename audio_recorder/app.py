@@ -1,13 +1,22 @@
 import os
-import subprocess
-import time
 import re
-from flask import Flask, render_template_string, request, jsonify, send_from_directory
+import subprocess
+import threading
+import time
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    render_template_string,
+    request,
+    send_from_directory,
+)
 
 app = Flask(__name__)
 
 # Mappa beállítása - Fixen a /config/www/recordings útvonalra
 SAVE_DIR = "/config/www/recordings"
+AUDIO_DEVICE = "default"
 
 try:
     os.makedirs(SAVE_DIR, exist_ok=True)
@@ -19,10 +28,10 @@ except Exception as e:
 recording_process = None
 current_wav_file = None
 last_processed_file = None
-start_time = None  # Kezdési idő elmentése a pontos stopper helyreállításához
+start_time = None  # Kezdési idő a stopper helyreállításához
 
 # =========================================================
-# BEÉPÍTETT HTML FELÜLET
+# BEÉPÍTETT HTML FELÜLET (ÖSSZEÉPÍTETT)
 # =========================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -30,11 +39,11 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>JARVIS Rögzítő & Hangkezelő</title>
+    <title>JARVIS Rögzítő & Streamer</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 30px; background: #121212; color: #fff; }
-        .card { background: #1e1e1e; padding: 20px; border-radius: 10px; max-width: 500px; margin: 0 auto; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
-        h2 { text-align: center; color: #00adb5; margin-bottom: 10px; }
+        body { font-family: Arial, sans-serif; margin: 20px; background: #121212; color: #fff; }
+        .card { background: #1e1e1e; padding: 20px; border-radius: 10px; max-width: 500px; margin: 0 auto 20px auto; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        h2 { text-align: center; color: #00adb5; margin-bottom: 10px; margin-top: 0; }
         .timer { text-align: center; font-size: 32px; font-weight: bold; color: #ff4757; margin: 15px 0; font-family: monospace; }
         .control-group { margin-bottom: 15px; }
         label { display: block; margin-bottom: 5px; font-weight: bold; }
@@ -45,11 +54,17 @@ HTML_TEMPLATE = """
         .btn-stop { background: #dc3545; color: white; }
         .btn-stop:disabled { background: #555; cursor: not-allowed; }
         .btn-group { display: flex; justify-content: space-between; margin-top: 15px; }
-        audio { width: 100%; margin-top: 20px; display: block; }
+        audio { width: 100%; margin-top: 10px; display: block; }
         .status { text-align: center; margin-top: 15px; font-style: italic; color: #aaa; word-break: break-all; }
     </style>
 </head>
 <body>
+
+<div class="card">
+    <h2>Élő Audio Stream</h2>
+    <p style="text-align: center; color: #ccc; margin-top: 0;">Valós idejű hallgatás a mikrofonból:</p>
+    <audio id="streamPlayer" controls src="stream"></audio>
+</div>
 
 <div class="card">
     <h2>JARVIS Felvétel Vezérlő</h2>
@@ -98,14 +113,11 @@ HTML_TEMPLATE = """
 <script>
     let timerInterval = null;
 
-    const basePath = window.location.pathname.replace(/\/$/, '');
-
     window.addEventListener('DOMContentLoaded', () => {
-        // Helyi beállítások betöltése
         loadSavedControls();
 
         // Hangerő lekérése a szervertől (amixer)
-        fetch(basePath + '/get_mic_volume')
+        fetch('get_mic_volume')
             .then(res => res.json())
             .then(data => {
                 if (data.status === 'success') {
@@ -115,7 +127,6 @@ HTML_TEMPLATE = """
             })
             .catch(err => console.error("Hiba a hangerő lekérésekor:", err));
 
-        // Állapot ellenőrzése újranyitáskor
         checkStatus();
     });
 
@@ -144,7 +155,7 @@ HTML_TEMPLATE = """
     }
 
     function checkStatus() {
-        fetch(basePath + '/status')
+        fetch('status')
             .then(res => res.json())
             .then(data => {
                 if (data.is_recording) {
@@ -159,7 +170,7 @@ HTML_TEMPLATE = """
 
     function updateMicVolume(val) {
         document.getElementById('micVolVal').innerText = val;
-        fetch(basePath + '/set_mic_volume', {
+        fetch('set_mic_volume', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ volume: parseInt(val) })
@@ -190,7 +201,7 @@ HTML_TEMPLATE = """
 
     function startRecording() {
         document.getElementById('statusText').innerText = "Indítás folyamatban...";
-        fetch(basePath + '/start', { method: 'POST' })
+        fetch('start', { method: 'POST' })
             .then(async res => {
                 const text = await res.text();
                 try {
@@ -227,7 +238,7 @@ HTML_TEMPLATE = """
             format: document.getElementById('format').value
         };
 
-        fetch(basePath + '/stop', {
+        fetch('stop', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -237,7 +248,7 @@ HTML_TEMPLATE = """
             if (data.status === 'success') {
                 document.getElementById('statusText').innerText = "Kész: " + data.file;
                 const player = document.getElementById('audioPlayer');
-                player.src = basePath + '/recordings/' + data.file + '?t=' + new Date().getTime();
+                player.src = 'recordings/' + data.file + '?t=' + new Date().getTime();
                 player.play();
             } else {
                 document.getElementById('statusText').innerText = "Hiba: " + data.message;
@@ -253,7 +264,10 @@ HTML_TEMPLATE = """
 </html>
 """
 
-def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_format):
+
+def process_audio_file(
+    wav_path, gain_db, filter_enabled, strength, output_format
+):
     global last_processed_file
     if not os.path.exists(wav_path):
         print(f"[HIBA] Nem található a WAV fájl: {wav_path}")
@@ -285,12 +299,17 @@ def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_forma
 
     if output_format == "mp3":
         cmd = [
-            "ffmpeg", "-y", 
-            "-i", wav_path, 
-            "-af", filter_str, 
-            "-c:a", "libmp3lame", 
-            "-b:a", "128k", 
-            output_path
+            "ffmpeg",
+            "-y",
+            "-i",
+            wav_path,
+            "-af",
+            filter_str,
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "128k",
+            output_path,
         ]
     else:
         temp_wav = os.path.join(SAVE_DIR, f"temp_{os.path.basename(wav_path)}")
@@ -301,10 +320,20 @@ def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_forma
         res = subprocess.run(cmd, capture_output=True, text=True)
 
         if res.returncode != 0 and output_format == "mp3":
-            print("[FIGYELMEZTETÉS] Első FFmpeg próbálkozás sikertelen, próbálkozás alter kódolóval...")
+            print(
+                "[FIGYELMEZTETÉS] Első FFmpeg próbálkozás sikertelen,"
+                " próbálkozás alter kódolóval..."
+            )
             cmd_fallback = [
-                "ffmpeg", "-y", "-i", wav_path, 
-                "-af", filter_str, "-acodec", "mp3", output_path
+                "ffmpeg",
+                "-y",
+                "-i",
+                wav_path,
+                "-af",
+                filter_str,
+                "-acodec",
+                "mp3",
+                output_path,
             ]
             subprocess.run(cmd_fallback, capture_output=True, text=True)
 
@@ -312,7 +341,9 @@ def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_forma
             if os.path.exists(wav_path):
                 os.remove(wav_path)
             last_processed_file = output_filename
-            print(f"[SIKER] MP3 fájl sikeresen létrehozva: {output_filename}")
+            print(
+                f"[SIKER] MP3 fájl sikeresen létrehozva: {output_filename}"
+            )
         else:
             if os.path.exists(temp_wav):
                 os.replace(temp_wav, wav_path)
@@ -329,31 +360,81 @@ def index():
     return render_template_string(HTML_TEMPLATE)
 
 
+# =========================================================
+# ÉLŐ STREAM ENDPOINT (IN-MEMORY FFMPEG PIPE)
+# =========================================================
+@app.route("/stream")
+def stream():
+    def generate_audio():
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-f",
+            "alsa",
+            "-i",
+            AUDIO_DEVICE,
+            "-af",
+            "afftdn=nr=10:nf=-50",
+            "-ac",
+            "1",
+            "-ar",
+            "22050",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "48k",
+            "-f",
+            "mp3",
+            "pipe:1",
+        ]
+
+        proc = subprocess.Popen(
+            ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+
+        try:
+            while True:
+                data = proc.stdout.read(1024)
+                if not data:
+                    break
+                yield data
+        finally:
+            proc.kill()
+
+    return Response(generate_audio(), mimetype="audio/mpeg")
+
+
 @app.route("/status", methods=["GET"])
 def get_status():
     global recording_process, start_time
-    is_recording = recording_process is not None and recording_process.poll() is None
-    
+    is_recording = (
+        recording_process is not None and recording_process.poll() is None
+    )
+
     elapsed_seconds = 0
     if is_recording and start_time:
         elapsed_seconds = int(time.time() - start_time)
 
-    return jsonify({
-        "is_recording": is_recording,
-        "elapsed_seconds": elapsed_seconds
-    })
+    return jsonify(
+        {"is_recording": is_recording, "elapsed_seconds": elapsed_seconds}
+    )
 
 
 @app.route("/get_mic_volume", methods=["GET"])
 def get_mic_volume():
     try:
-        res = subprocess.run(["amixer", "sget", "Capture"], capture_output=True, text=True)
+        res = subprocess.run(
+            ["amixer", "sget", "Capture"], capture_output=True, text=True
+        )
         if res.returncode != 0:
-            res = subprocess.run(["amixer", "sget", "Mic"], capture_output=True, text=True)
+            res = subprocess.run(
+                ["amixer", "sget", "Mic"], capture_output=True, text=True
+            )
 
         match = re.search(r"\[(\d+)%\]", res.stdout)
         if match:
-            return jsonify({"status": "success", "volume": int(match.group(1))})
+            return jsonify(
+                {"status": "success", "volume": int(match.group(1))}
+            )
         return jsonify({"status": "success", "volume": 80})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
@@ -364,9 +445,17 @@ def set_mic_volume():
     data = request.json or {}
     volume = data.get("volume", 80)
     try:
-        res = subprocess.run(["amixer", "sset", "Capture", f"{volume}%"], capture_output=True, text=True)
+        res = subprocess.run(
+            ["amixer", "sset", "Capture", f"{volume}%"],
+            capture_output=True,
+            text=True,
+        )
         if res.returncode != 0:
-            subprocess.run(["amixer", "sset", "Mic", f"{volume}%"], capture_output=True, text=True)
+            subprocess.run(
+                ["amixer", "sset", "Mic", f"{volume}%"],
+                capture_output=True,
+                text=True,
+            )
 
         print(f"[INFO] Mikrofon hangerő beállítva: {volume}%")
         return jsonify({"status": "success", "volume": volume})
@@ -378,27 +467,45 @@ def set_mic_volume():
 def start_recording():
     global recording_process, current_wav_file, start_time
     if recording_process is not None and recording_process.poll() is None:
-        return jsonify({"status": "error", "message": "A felvétel már folyamatban van!"})
+        return jsonify(
+            {"status": "error", "message": "A felvétel már folyamatban van!"}
+        )
 
     try:
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         current_wav_file = os.path.join(SAVE_DIR, f"rec_{timestamp}.wav")
 
-        cmd = ["arecord", "-D", "default", "-f", "cd", "-t", "wav", current_wav_file]
+        cmd = [
+            "arecord",
+            "-D",
+            AUDIO_DEVICE,
+            "-f",
+            "cd",
+            "-t",
+            "wav",
+            current_wav_file,
+        ]
         print(f"[INFO] Parancs indítása: {' '.join(cmd)}")
-        
-        recording_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        recording_process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
         start_time = time.time()
-        
+
         time.sleep(0.2)
         if recording_process.poll() is not None:
             _, stderr = recording_process.communicate()
-            err_msg = stderr.decode('utf-8', errors='ignore') or "Ismeretlen arecord hiba"
+            err_msg = (
+                stderr.decode("utf-8", errors="ignore")
+                or "Ismeretlen arecord hiba"
+            )
             recording_process = None
             current_wav_file = None
             start_time = None
             print(f"[HIBA] Arecord nem tudott elindulni: {err_msg}")
-            return jsonify({"status": "error", "message": f"Arecord hiba: {err_msg}"})
+            return jsonify(
+                {"status": "error", "message": f"Arecord hiba: {err_msg}"}
+            )
 
         print(f"[INFO] Felvétel elindítva: {current_wav_file}")
         return jsonify({"status": "success", "file": current_wav_file})
@@ -432,7 +539,9 @@ def stop_recording():
     output_format = data.get("format", "mp3").lower()
 
     if current_wav_file and os.path.exists(current_wav_file):
-        process_audio_file(current_wav_file, gain_db, filter_enabled, strength, output_format)
+        process_audio_file(
+            current_wav_file, gain_db, filter_enabled, strength, output_format
+        )
 
     saved_file = last_processed_file
     current_wav_file = None

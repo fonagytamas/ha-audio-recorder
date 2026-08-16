@@ -1,239 +1,61 @@
 import os
-import time
 import subprocess
-import threading
-from datetime import datetime
-from flask import Flask, render_template_string, jsonify, request, send_from_directory
+import time
+import re
+from flask import Flask, render_template, request, jsonify, send_from_directory
 
 app = Flask(__name__)
 
-SAVE_DIR = "/config/www/recordings"
+# Mappák beállítása
+SAVE_DIR = "/media/jarvis_recordings"
+os.makedirs(SAVE_DIR, exist_ok=True)
 
-def ensure_dir_exists():
-    try:
-        os.makedirs(SAVE_DIR, exist_ok=True)
-        os.chmod("/config/www", 0o777)
-        os.chmod(SAVE_DIR, 0o777)
-    except Exception as e:
-        print(f"Mappa hiba: {e}")
-
+# Globális állapotváltozók
 recording_process = None
 current_wav_file = None
-recording_start_time = None
 last_processed_file = None
 
-HTML_CODE = """
-<!DOCTYPE html>
-<html lang="hu">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>JARVIS Education</title>
-    <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #111b21; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px 0; }
-        .card { background: #202c33; padding: 25px; border-radius: 12px; text-align: center; width: 340px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
-        h3 { margin-top: 0; color: #00a884; letter-spacing: 1px; }
-        .control-group { margin: 12px 0; text-align: left; background: #111b21; padding: 12px; border-radius: 8px; }
-        label { font-size: 13px; color: #8696a0; display: block; margin-bottom: 5px; }
-        .row { display: flex; justify-content: space-between; align-items: center; }
-        select, input[type=range] { width: 100%; margin-top: 5px; }
-        input[type=checkbox] { transform: scale(1.3); cursor: pointer; }
-        .slider-val { font-size: 12px; color: #00a884; font-weight: bold; float: right; }
-        button { padding: 12px 20px; font-size: 15px; border: none; border-radius: 6px; cursor: pointer; margin: 8px 4px 0 4px; font-weight: bold; width: 45%; }
-        #recBtn { background: #00a884; color: white; }
-        #stopBtn { background: #ea4335; color: white; }
-        button:disabled { opacity: 0.3; cursor: not-allowed; }
-        #status { margin-top: 15px; font-size: 13px; color: #aebac1; word-break: break-word; min-height: 36px; }
-        #timer { font-size: 14px; font-weight: bold; color: #ea4335; margin-top: 5px; display: none; }
-        .player-box { margin-top: 15px; background: #111b21; padding: 12px; border-radius: 8px; text-align: left; display: none; }
-        audio { width: 100%; margin-top: 8px; height: 35px; }
-    </style>
-</head>
-<body>
-<div class="card">
-    <h3>JARVIS Education</h3>
-    
-    <div class="control-group">
-        <label>Hangerő kiemelés (Gain Boost) <span class="slider-val" id="gainVal">+30 dB</span></label>
-        <input type="range" id="gainBoost" min="0" max="60" value="30" oninput="document.getElementById('gainVal').innerText = '+' + this.value + ' dB'">
-    </div>
-
-    <div class="control-group">
-        <div class="row">
-            <span style="font-size: 14px;">Intelligens Zajszűrés</span>
-            <input type="checkbox" id="filterEnable" checked onchange="toggleFilter()">
-        </div>
-    </div>
-
-    <div class="control-group" id="noiseGroup">
-        <label>Szűrés erőssége <span class="slider-val" id="filterVal">50%</span></label>
-        <input type="range" id="filterStrength" min="10" max="100" value="50" oninput="document.getElementById('filterVal').innerText = this.value + '%'">
-    </div>
-
-    <div class="control-group">
-        <label>Kimeneti formátum</label>
-        <select id="formatSelect">
-            <option value="mp3">MP3 (Tömörített - kis méret)</option>
-            <option value="wav">WAV (Eredeti - nagy méret)</option>
-        </select>
-    </div>
-
-    <button id="recBtn" onclick="startRec()">Indítás</button>
-    <button id="stopBtn" onclick="stopRec()" disabled>Leállítás</button>
-    
-    <div id="timer">🔴 Rögzítés: <span id="timeVal">00:00</span></div>
-    <div id="status">Készenlétben</div>
-
-    <div class="player-box" id="playerBox">
-        <label style="color:#00a884; font-weight:bold; font-size:12px;">Legutóbbi felvétel:</label>
-        <audio id="audioPlayer" controls></audio>
-    </div>
-</div>
-
-<script>
-    let timerInterval = null;
-
-    function toggleFilter() {
-        const enabled = document.getElementById('filterEnable').checked;
-        document.getElementById('noiseGroup').style.opacity = enabled ? "1" : "0.4";
-        document.getElementById('filterStrength').disabled = !enabled;
-    }
-
-    function updateTimer(startTimeSeconds) {
-        const now = Math.floor(Date.now() / 1000);
-        const elapsed = now - startTimeSeconds;
-        const mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
-        const secs = String(elapsed % 60).padStart(2, '0');
-        document.getElementById('timeVal').innerText = `${mins}:${secs}`;
-    }
-
-    async function checkStatus() {
-        try {
-            const res = await fetch('status');
-            const data = await res.json();
-            
-            if (data.is_recording) {
-                document.getElementById('recBtn').disabled = true;
-                document.getElementById('stopBtn').disabled = false;
-                document.getElementById('status').innerText = "🔴 Rögzítés folyamatban...";
-                document.getElementById('timer').style.display = "block";
-                
-                if (timerInterval) clearInterval(timerInterval);
-                updateTimer(data.start_time);
-                timerInterval = setInterval(() => updateTimer(data.start_time), 1000);
-            } else {
-                if (timerInterval) clearInterval(timerInterval);
-                document.getElementById('timer').style.display = "none";
-                document.getElementById('recBtn').disabled = false;
-                document.getElementById('stopBtn').disabled = true;
-                if (!document.getElementById('status').innerText.includes("💾") && 
-                    !document.getElementById('status').innerText.includes("⏳")) {
-                    document.getElementById('status').innerText = "Készenlétben";
-                }
-            }
-        } catch (err) {
-            console.error("Státusz ellenőrzési hiba", err);
-        }
-    }
-
-    async function startRec() {
-        document.getElementById('status').innerText = "⏳ Indítás...";
-        document.getElementById('playerBox').style.display = "none";
-        try {
-            const res = await fetch('start', { method: 'POST' });
-            const data = await res.json();
-            if (data.status === 'ok') {
-                checkStatus();
-            } else {
-                document.getElementById('status').innerText = "❌ Hiba: " + data.message;
-            }
-        } catch (err) {
-            document.getElementById('status').innerText = "❌ Hálózati hiba!";
-        }
-    }
-
-    async function stopRec() {
-        document.getElementById('status').innerText = "⏳ Tisztítás és átalakítás...";
-        document.getElementById('recBtn').disabled = true;
-        document.getElementById('stopBtn').disabled = true;
-
-        const payload = {
-            gain: parseInt(document.getElementById('gainBoost').value),
-            filter: document.getElementById('filterEnable').checked,
-            strength: parseInt(document.getElementById('filterStrength').value),
-            format: document.getElementById('formatSelect').value
-        };
-
-        try {
-            const res = await fetch('stop', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-            const data = await res.json();
-            if (data.status === 'stopped') {
-                document.getElementById('status').innerText = "💾 Mentve! (" + payload.format.toUpperCase() + ")";
-                setTimeout(loadPlayer, 3000);
-            } else {
-                document.getElementById('status').innerText = "⚠️ Leállítva.";
-            }
-        } catch (err) {
-            document.getElementById('status').innerText = "❌ Hiba a feldolgozás során!";
-        } finally {
-            checkStatus();
-        }
-    }
-
-    async function loadPlayer() {
-        try {
-            const res = await fetch('latest');
-            const data = await res.json();
-            if (data.file) {
-                const player = document.getElementById('audioPlayer');
-                player.src = "recordings_file/" + data.file + "?t=" + new Date().getTime();
-                document.getElementById('playerBox').style.display = "block";
-            }
-        } catch (e) {
-            console.error("Lejátszó hiba", e);
-        }
-    }
-
-    checkStatus();
-    setInterval(checkStatus, 3000);
-</script>
-</body>
-</html>
-"""
 
 def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_format):
+    """
+    Feldolgozza a nyers WAV fájlt: zajszűrés, hangerő-kiemelés, normálás és MP3/WAV mentés.
+    """
     global last_processed_file
     if not os.path.exists(wav_path):
         print(f"[HIBA] Nem található a WAV fájl: {wav_path}")
         return
 
     base_name = os.path.splitext(os.path.basename(wav_path))[0]
-    
     ext = "mp3" if output_format == "mp3" else "wav"
     output_filename = f"{base_name}.{ext}"
     output_path = os.path.join(SAVE_DIR, output_filename)
 
     filters = []
 
-    # 1. Szoftveres Alap Gain
-    if gain_db > 0:
-        filters.append(f"volume={gain_db}dB")
-
-    # 2. Dinamikus Hangerő-Normalizálás (felerősíti a távoli/halk beszédet)
-    filters.append("dynaudnorm=f=150:g=15")
-
-    # 3. Zajszűrés
+    # =========================================================
+    # 1. ZAJSZŰRÉS (A HANGERŐ-KIEMELÉS ELŐTT)
+    # =========================================================
     if filter_enabled:
-        hp = int(60 + (strength / 100.0) * 140)
-        lp = int(10000 - (strength / 100.0) * 5000)
+        # FFT alapú intelligens zajcsökkentés (afftdn)
+        nr_db = int(12 + (strength / 100.0) * 28)
+        filters.append(f"afftdn=nr={nr_db}:nf=-50")
+
+        # Beszédtartomány megtartása (Mély zúgás és magas sípolás vágása)
+        hp = int(80 + (strength / 100.0) * 120)      # 80Hz - 200Hz alatti mély zúgás vágása
+        lp = int(8000 - (strength / 100.0) * 3500)   # 8000Hz - 4500Hz feletti sípolás vágása
         filters.append(f"highpass=f={hp}")
         filters.append(f"lowpass=f={lp}")
 
-    # 4. Biztonsági határoló
+    # =========================================================
+    # 2. HANGERŐ-KIEMELÉS ÉS DINAMIKUS NORMÁLÁS (SZŰRÉS UTÁN)
+    # =========================================================
+    if gain_db > 0:
+        filters.append(f"volume={gain_db}dB")
+
+    # Dinamikus normálás (már csak a tiszta beszédet erősíti fel)
+    filters.append("dynaudnorm=f=150:g=15")
+
+    # Biztonsági határoló (a recsegés/torzítás ellen)
     filters.append("alimiter=limit=0.95")
 
     filter_str = ",".join(filters)
@@ -254,121 +76,128 @@ def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_forma
     try:
         print(f"[INFO] FFmpeg parancs futtatása: {' '.join(cmd)}")
         res = subprocess.run(cmd, capture_output=True, text=True)
-        
-        # Ha a libmp3lame nem működne, próbálkozunk az általános mp3 kódolóval
+
         if res.returncode != 0 and output_format == "mp3":
-            print(f"[FIGYELMEZTETÉS] Primary libmp3lame sikertelen, próbálkozás altípussal... Hiba: {res.stderr}")
+            print("[FIGYELMEZTETÉS] Első FFmpeg próbálkozás sikertelen, próbálkozás alter kódolóval...")
             cmd_fallback = [
                 "ffmpeg", "-y", "-i", wav_path, 
                 "-af", filter_str, "-acodec", "mp3", output_path
             ]
-            res_fb = subprocess.run(cmd_fallback, capture_output=True, text=True)
-            if res_fb.returncode != 0:
-                print(f"[HIBA] MP3 Fallback is sikertelen: {res_fb.stderr}")
+            subprocess.run(cmd_fallback, capture_output=True, text=True)
 
-        # Ha létrejött az MP3 fájl, töröljük a nyers WAV-ot
         if output_format == "mp3" and os.path.exists(output_path):
             if os.path.exists(wav_path):
                 os.remove(wav_path)
-                print(f"[SIKER] WAV törölve, kimenet: {output_filename}")
             last_processed_file = output_filename
+            print(f"[SIKER] MP3 fájl sikeresen létrehozva: {output_filename}")
         else:
             if os.path.exists(temp_wav):
                 os.replace(temp_wav, wav_path)
             last_processed_file = os.path.basename(wav_path)
+            print(f"[INFO] WAV fájl feldolgozva: {last_processed_file}")
 
     except Exception as e:
         print(f"[KIVÉTEL HIBA] FFmpeg feldolgozási hiba: {e}")
         last_processed_file = os.path.basename(wav_path)
 
-@app.route('/')
-def index():
-    ensure_dir_exists()
-    return render_template_string(HTML_CODE)
 
-@app.route('/recordings_file/<filename>')
-def serve_file(filename):
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+# =========================================================
+# MIKROFON HANGERŐ KEZELÉS (AMIXER)
+# =========================================================
+@app.route("/get_mic_volume", methods=["GET"])
+def get_mic_volume():
+    """Lekéri a mikrofon jelenlegi hangerő-százalékát."""
+    try:
+        res = subprocess.run(["amixer", "sget", "Capture"], capture_output=True, text=True)
+        if res.returncode != 0:
+            res = subprocess.run(["amixer", "sget", "Mic"], capture_output=True, text=True)
+
+        match = re.search(r"\[(\d+)%\]", res.stdout)
+        if match:
+            return jsonify({"status": "success", "volume": int(match.group(1))})
+        return jsonify({"status": "success", "volume": 80})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route("/set_mic_volume", methods=["POST"])
+def set_mic_volume():
+    """Beállítja a rendszerszintű mikrofon hangerőt (0-100%)."""
+    data = request.json or {}
+    volume = data.get("volume", 80)
+    try:
+        res = subprocess.run(["amixer", "sset", "Capture", f"{volume}%"], capture_output=True, text=True)
+        if res.returncode != 0:
+            subprocess.run(["amixer", "sset", "Mic", f"{volume}%"], capture_output=True, text=True)
+
+        print(f"[INFO] Mikrofon hangerő beállítva: {volume}%")
+        return jsonify({"status": "success", "volume": volume})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+# =========================================================
+# FELVÉTEL KEZELÉS
+# =========================================================
+@app.route("/start", methods=["POST"])
+def start_recording():
+    global recording_process, current_wav_file
+    if recording_process is not None:
+        return jsonify({"status": "error", "message": "A felvétel már folyamatban van!"})
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    current_wav_file = os.path.join(SAVE_DIR, f"rec_{timestamp}.wav")
+
+    cmd = ["arecord", "-D", "default", "-f", "cd", "-t", "wav", current_wav_file]
+    
+    try:
+        recording_process = subprocess.Popen(cmd)
+        print(f"[INFO] Felvétel elindítva: {current_wav_file}")
+        return jsonify({"status": "success", "file": current_wav_file})
+    except Exception as e:
+        recording_process = None
+        current_wav_file = None
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route("/stop", methods=["POST"])
+def stop_recording():
+    global recording_process, current_wav_file, last_processed_file
+    if recording_process is None:
+        return jsonify({"status": "error", "message": "Nincs aktív felvétel!"})
+
+    recording_process.terminate()
+    try:
+        recording_process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        recording_process.kill()
+
+    recording_process = None
+
+    data = request.json or {}
+    gain_db = float(data.get("gain", 0))
+    filter_enabled = bool(data.get("filter", False))
+    strength = float(data.get("strength", 50))
+    output_format = data.get("format", "mp3").lower()
+
+    if current_wav_file and os.path.exists(current_wav_file):
+        process_audio_file(current_wav_file, gain_db, filter_enabled, strength, output_format)
+
+    saved_file = last_processed_file
+    current_wav_file = None
+
+    return jsonify({"status": "success", "file": saved_file})
+
+
+@app.route("/recordings/<filename>")
+def get_recording(filename):
     return send_from_directory(SAVE_DIR, filename)
 
-@app.route('/latest', methods=['GET'])
-def get_latest():
-    global last_processed_file
-    return jsonify({"file": last_processed_file})
 
-@app.route('/status', methods=['GET'])
-def get_status():
-    global recording_process, recording_start_time
-    is_recording = recording_process is not None and recording_process.poll() is None
-    return jsonify({
-        "is_recording": is_recording,
-        "start_time": recording_start_time if is_recording else None
-    })
-
-@app.route('/start', methods=['POST'])
-def start_recording():
-    global recording_process, current_wav_file, recording_start_time
-    ensure_dir_exists()
-
-    if recording_process is None or recording_process.poll() is not None:
-        now_str = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        current_wav_file = os.path.join(SAVE_DIR, f"rec_{now_str}.wav")
-        recording_start_time = int(time.time())
-
-        # 48kHz mintavétel az ALSA közvetlen eléréshez
-        cmd = ["arecord", "-D", "plughw:0,0", "-f", "S16_LE", "-r", "48000", "-c", "1", current_wav_file]
-        try:
-            recording_process = subprocess.Popen(cmd, stderr=subprocess.PIPE)
-            time.sleep(0.5)
-            
-            if recording_process.poll() is not None:
-                cmd_fb = ["arecord", "-f", "S16_LE", "-r", "48000", "-c", "1", current_wav_file]
-                recording_process = subprocess.Popen(cmd_fb, stderr=subprocess.PIPE)
-                time.sleep(0.5)
-                
-                if recording_process.poll() is not None:
-                    _, err_fb = recording_process.communicate()
-                    recording_process = None
-                    recording_start_time = None
-                    return jsonify({"status": "error", "message": err_fb.decode('utf-8', errors='ignore')})
-
-            return jsonify({"status": "ok"})
-        except Exception as e:
-            recording_process = None
-            recording_start_time = None
-            return jsonify({"status": "error", "message": str(e)})
-
-    return jsonify({"status": "already_running"})
-
-@app.route('/stop', methods=['POST'])
-def stop_recording():
-    global recording_process, current_wav_file, recording_start_time
-    data = request.get_json() or {}
-    
-    gain = data.get('gain', 30)
-    filter_enabled = data.get('filter', True)
-    strength = data.get('strength', 50)
-    output_format = data.get('format', 'mp3')
-
-    if recording_process is not None:
-        try:
-            recording_process.terminate()
-            recording_process.wait(timeout=2)
-        except Exception:
-            recording_process.kill()
-        
-        recording_process = None
-        recording_start_time = None
-
-        if current_wav_file and os.path.exists(current_wav_file):
-            threading.Thread(
-                target=process_audio_file,
-                args=(current_wav_file, gain, filter_enabled, strength, output_format)
-            ).start()
-
-        return jsonify({"status": "stopped"})
-
-    return jsonify({"status": "not_running"})
-
-if __name__ == '__main__':
-    ensure_dir_exists()
-    app.run(host='0.0.0.0', port=8099)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8099)

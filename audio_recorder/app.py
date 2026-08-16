@@ -6,12 +6,12 @@ from flask import Flask, render_template_string, request, jsonify, send_from_dir
 
 app = Flask(__name__)
 
-# Mappák beállítása - Modosítva a www/recordings mappára
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SAVE_DIR = os.path.join(BASE_DIR, "www", "recordings")
+# Mappa beállítása - Fixen a /config/www/recordings útvonalra
+SAVE_DIR = "/config/www/recordings"
 
 try:
     os.makedirs(SAVE_DIR, exist_ok=True)
+    print(f"[INFO] Mentési mappa beállítva: {SAVE_DIR}")
 except Exception as e:
     print(f"[FIGYELMEZTETÉS] Nem sikerült létrehozni a SAVE_DIR mappát: {e}")
 

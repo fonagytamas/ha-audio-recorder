@@ -17,6 +17,7 @@ except Exception as e:
 recording_process = None
 current_wav_file = None
 last_processed_file = None
+start_time = None  # Kezdési idő elmentése a pontos stopper helyreállításához
 
 # =========================================================
 # BEÉPÍTETT HTML FELÜLET
@@ -94,12 +95,12 @@ HTML_TEMPLATE = """
 
 <script>
     let timerInterval = null;
-    let seconds = 0;
+    let initialSeconds = 0;
 
-    // Ingress elérési út felderítése
-    const basePath = window.location.pathname.replace(/\\/$/, '');
+    const basePath = window.location.pathname.replace(/\/$/, '');
 
     window.addEventListener('DOMContentLoaded', () => {
+        // Hangerő lekérése
         fetch(basePath + '/get_mic_volume')
             .then(res => res.json())
             .then(data => {
@@ -109,7 +110,24 @@ HTML_TEMPLATE = """
                 }
             })
             .catch(err => console.error("Hiba a hangerő lekérésekor:", err));
+
+        // Állapot ellenőrzése újranyitáskor
+        checkStatus();
     });
+
+    function checkStatus() {
+        fetch(basePath + '/status')
+            .then(res => res.json())
+            .then(data => {
+                if (data.is_recording) {
+                    document.getElementById('statusText').innerText = "Felvétel folyamatban...";
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                    startTimer(data.elapsed_seconds);
+                }
+            })
+            .catch(err => console.error("Hiba az állapot lekérésekor:", err));
+    }
 
     function updateMicVolume(val) {
         document.getElementById('micVolVal').innerText = val;
@@ -120,15 +138,21 @@ HTML_TEMPLATE = """
         });
     }
 
-    function startTimer() {
-        seconds = 0;
-        document.getElementById('timer').innerText = "00:00";
+    function startTimer(offsetSeconds = 0) {
+        let seconds = offsetSeconds;
+        
+        const updateDisplay = (s) => {
+            const mins = String(Math.floor(s / 60)).padStart(2, '0');
+            const secs = String(s % 60).padStart(2, '0');
+            document.getElementById('timer').innerText = `${mins}:${secs}`;
+        };
+
+        updateDisplay(seconds);
         clearInterval(timerInterval);
+        
         timerInterval = setInterval(() => {
             seconds++;
-            const mins = String(Math.floor(seconds / 60)).padStart(2, '0');
-            const secs = String(seconds % 60).padStart(2, '0');
-            document.getElementById('timer').innerText = `${mins}:${secs}`;
+            updateDisplay(seconds);
         }, 1000);
     }
 
@@ -152,7 +176,7 @@ HTML_TEMPLATE = """
                     document.getElementById('statusText').innerText = "Felvétel folyamatban...";
                     document.getElementById('startBtn').disabled = true;
                     document.getElementById('stopBtn').disabled = false;
-                    startTimer();
+                    startTimer(0);
                 } else {
                     document.getElementById('statusText').innerText = "Hiba: " + data.message;
                 }
@@ -277,6 +301,21 @@ def index():
     return render_template_string(HTML_TEMPLATE)
 
 
+@app.route("/status", methods=["GET"])
+def get_status():
+    global recording_process, start_time
+    is_recording = recording_process is not None and recording_process.poll() is None
+    
+    elapsed_seconds = 0
+    if is_recording and start_time:
+        elapsed_seconds = int(time.time() - start_time)
+
+    return jsonify({
+        "is_recording": is_recording,
+        "elapsed_seconds": elapsed_seconds
+    })
+
+
 @app.route("/get_mic_volume", methods=["GET"])
 def get_mic_volume():
     try:
@@ -309,8 +348,8 @@ def set_mic_volume():
 
 @app.route("/start", methods=["POST"])
 def start_recording():
-    global recording_process, current_wav_file
-    if recording_process is not None:
+    global recording_process, current_wav_file, start_time
+    if recording_process is not None and recording_process.poll() is None:
         return jsonify({"status": "error", "message": "A felvétel már folyamatban van!"})
 
     try:
@@ -321,6 +360,7 @@ def start_recording():
         print(f"[INFO] Parancs indítása: {' '.join(cmd)}")
         
         recording_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        start_time = time.time()
         
         time.sleep(0.2)
         if recording_process.poll() is not None:
@@ -328,6 +368,7 @@ def start_recording():
             err_msg = stderr.decode('utf-8', errors='ignore') or "Ismeretlen arecord hiba"
             recording_process = None
             current_wav_file = None
+            start_time = None
             print(f"[HIBA] Arecord nem tudott elindulni: {err_msg}")
             return jsonify({"status": "error", "message": f"Arecord hiba: {err_msg}"})
 
@@ -336,13 +377,14 @@ def start_recording():
     except Exception as e:
         recording_process = None
         current_wav_file = None
+        start_time = None
         print(f"[KIVÉTEL HIBA START] {str(e)}")
         return jsonify({"status": "error", "message": str(e)})
 
 
 @app.route("/stop", methods=["POST"])
 def stop_recording():
-    global recording_process, current_wav_file, last_processed_file
+    global recording_process, current_wav_file, last_processed_file, start_time
     if recording_process is None:
         return jsonify({"status": "error", "message": "Nincs aktív felvétel!"})
 
@@ -353,6 +395,7 @@ def stop_recording():
         recording_process.kill()
 
     recording_process = None
+    start_time = None
 
     data = request.json or {}
     gain_db = float(data.get("gain", 0))

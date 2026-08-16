@@ -74,8 +74,8 @@ HTML_CODE = """
     <div class="control-group">
         <label>Kimeneti formátum</label>
         <select id="formatSelect">
-            <option value="mp3">MP3 (Tömörített - kis méret)</option>
-            <option value="wav">WAV (Eredeti - nagy méret)</option>
+            <option value="mp3">MP3 (Tömörített)</option>
+            <option value="wav">WAV (Eredeti)</option>
         </select>
     </div>
 
@@ -129,15 +129,15 @@ HTML_CODE = """
                 document.getElementById('timer').style.display = "none";
                 document.getElementById('recBtn').disabled = false;
                 document.getElementById('stopBtn').disabled = true;
-                if (!document.getElementById('status').innerText.includes("💾") && !document.getElementById('status').innerText.includes("⏳")) {
+                
+                if (!document.getElementById('status').innerText.includes("💾") && 
+                    !document.getElementById('status').innerText.includes("⏳")) {
                     document.getElementById('status').innerText = "Készenlétben";
                 }
             }
 
             if (data.last_error) {
-                document.getElementById('logBox').innerText = "FFmpeg hiba:\n" + data.last_error;
-            } else {
-                document.getElementById('logBox').innerText = "";
+                document.getElementById('logBox').innerText = "Hiba részletei:\n" + data.last_error;
             }
         } catch (err) {
             console.error("Státusz ellenőrzési hiba", err);
@@ -145,18 +145,24 @@ HTML_CODE = """
     }
 
     async function startRec() {
+        document.getElementById('recBtn').disabled = true;
         document.getElementById('status').innerText = "⏳ Indítás...";
         document.getElementById('playerBox').style.display = "none";
+        document.getElementById('logBox').innerText = "";
+        
         try {
             const res = await fetch('start', { method: 'POST' });
             const data = await res.json();
             if (data.status === 'ok') {
                 checkStatus();
             } else {
-                document.getElementById('status').innerText = "❌ Hiba: " + data.message;
+                document.getElementById('status').innerText = "❌ Hiba történt!";
+                document.getElementById('logBox').innerText = data.message || "Ismeretlen hiba";
+                document.getElementById('recBtn').disabled = false;
             }
         } catch (err) {
             document.getElementById('status').innerText = "❌ Hálózati hiba!";
+            document.getElementById('recBtn').disabled = false;
         }
     }
 
@@ -224,27 +230,21 @@ def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_forma
 
     filters = []
 
-    # 1. Hangerő kiemelés
     if gain_db > 0:
         filters.append(f"volume={gain_db}dB")
 
-    # 2. Zajszűrés
     if filter_enabled:
         hp = int(40 + (strength / 100.0) * 200)
         lp = int(12000 - (strength / 100.0) * 8000)
         filters.append(f"highpass=f={hp}")
         filters.append(f"lowpass=f={lp}")
-        
         nr = int(12 + (strength / 100.0) * 28)
         filters.append(f"afftdn=nr={nr}:nf=-40")
 
-    # 3. Dinamika kompresszor & Loudnorm
     filters.append("compand=attacks=0.02:decays=0.2:points=-80/-80|-45/-20|-10/-6|0/0")
     filters.append("loudnorm=I=-14:TP=-1.0:LRA=11")
 
     filter_str = ",".join(filters)
-
-    # Ideiglenes feldolgozási fájl
     temp_output = os.path.join(SAVE_DIR, f"proc_{int(time.time())}.{output_format}")
 
     cmd = ["ffmpeg", "-y", "-i", wav_path, "-af", filter_str]
@@ -255,22 +255,17 @@ def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_forma
         cmd.append(temp_output)
 
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
         last_error_log = ""
 
-        # Sikeres feldolgozás esetén lecseréljük a végleges fájlra
         if os.path.exists(temp_output):
             os.replace(temp_output, output_path)
-            
-            # Eredeti nyers WAV törlése, ha MP3-ba mentettünk vagy átneveztük
             if output_path != wav_path and os.path.exists(wav_path):
                 os.remove(wav_path)
 
         last_processed_file = output_filename
     except subprocess.CalledProcessError as e:
         last_error_log = e.stderr if e.stderr else str(e)
-        print(f"FFmpeg hiba: {last_error_log}")
-        # Ha elhasal az FFmpeg, legalább a nyers WAV megmarad
         last_processed_file = os.path.basename(wav_path)
 
 @app.route('/')
@@ -303,41 +298,38 @@ def start_recording():
     ensure_dir_exists()
     last_error_log = ""
 
-    if recording_process is None or recording_process.poll() is not None:
-        now_str = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        current_wav_file = os.path.join(SAVE_DIR, f"rec_{now_str}.wav")
-        recording_start_time = int(time.time())
-
-        # Mikrofon jelszintjének felhúzása hardveres szinten
+    # Kényszerített tisztítás: ha maradt elakadt folyamat, leállítjuk
+    if recording_process is not None and recording_process.poll() is None:
         try:
-            subprocess.run(["amixer", "set", "Capture", "100%"], capture_output=True)
-            subprocess.run(["amixer", "set", "Mic", "100%"], capture_output=True)
+            recording_process.kill()
         except Exception:
             pass
+        recording_process = None
 
-        cmd = ["arecord", "-D", "plughw:0,0", "-f", "S16_LE", "-r", "44100", "-c", "1", current_wav_file]
-        try:
-            recording_process = subprocess.Popen(cmd, stderr=subprocess.PIPE)
-            time.sleep(0.5)
-            
-            if recording_process.poll() is not None:
-                cmd_fb = ["arecord", "-f", "S16_LE", "-r", "44100", "-c", "1", current_wav_file]
-                recording_process = subprocess.Popen(cmd_fb, stderr=subprocess.PIPE)
-                time.sleep(0.5)
-                
-                if recording_process.poll() is not None:
-                    _, err_fb = recording_process.communicate()
-                    recording_process = None
-                    recording_start_time = None
-                    return jsonify({"status": "error", "message": err_fb.decode('utf-8', errors='ignore')})
+    now_str = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    current_wav_file = os.path.join(SAVE_DIR, f"rec_{now_str}.wav")
+    recording_start_time = int(time.time())
 
-            return jsonify({"status": "ok"})
-        except Exception as e:
+    cmd = ["arecord", "-f", "S16_LE", "-r", "44100", "-c", "1", current_wav_file]
+    
+    try:
+        recording_process = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        time.sleep(0.3)
+        
+        if recording_process.poll() is not None:
+            _, err = recording_process.communicate()
+            err_text = err.decode('utf-8', errors='ignore') if err else "Ismeretlen arecord hiba"
             recording_process = None
             recording_start_time = None
-            return jsonify({"status": "error", "message": str(e)})
+            last_error_log = err_text
+            return jsonify({"status": "error", "message": err_text})
 
-    return jsonify({"status": "already_running"})
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        recording_process = None
+        recording_start_time = None
+        last_error_log = str(e)
+        return jsonify({"status": "error", "message": str(e)})
 
 @app.route('/stop', methods=['POST'])
 def stop_recording():
@@ -360,7 +352,6 @@ def stop_recording():
         recording_start_time = None
 
         if current_wav_file and os.path.exists(current_wav_file):
-            # Szinkron futtatás: a leállítás gomb megnyomásakor rögtön feldolgozza!
             process_audio_file(current_wav_file, gain, filter_enabled, strength, output_format)
 
         return jsonify({"status": "stopped"})

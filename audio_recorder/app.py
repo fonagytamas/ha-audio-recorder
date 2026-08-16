@@ -173,7 +173,7 @@ HTML_CODE = """
             const data = await res.json();
             if (data.status === 'stopped') {
                 document.getElementById('status').innerText = "💾 Mentve! (" + payload.format.toUpperCase() + ")";
-                setTimeout(loadPlayer, 2500);
+                setTimeout(loadPlayer, 3000);
             } else {
                 document.getElementById('status').innerText = "⚠️ Leállítva.";
             }
@@ -208,44 +208,69 @@ HTML_CODE = """
 def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_format):
     global last_processed_file
     if not os.path.exists(wav_path):
+        print(f"[HIBA] Nem található a WAV fájl: {wav_path}")
         return
 
     base_name = os.path.splitext(os.path.basename(wav_path))[0]
-    output_filename = f"{base_name}.{output_format}"
+    
+    ext = "mp3" if output_format == "mp3" else "wav"
+    output_filename = f"{base_name}.{ext}"
     output_path = os.path.join(SAVE_DIR, output_filename)
 
     filters = []
 
-    # 1. Drasztikus hangerő kiemelés (Gain Boost)
+    # 1. Szoftveres Alap Gain
     if gain_db > 0:
         filters.append(f"volume={gain_db}dB")
 
-    # 2. Zajszűrés és beszéd frekvenciatartomány szűrése
+    # 2. Dinamikus Hangerő-Normalizálás (felerősíti a távoli/halk beszédet)
+    filters.append("dynaudnorm=f=150:g=15")
+
+    # 3. Zajszűrés
     if filter_enabled:
         hp = int(60 + (strength / 100.0) * 140)
         lp = int(10000 - (strength / 100.0) * 5000)
         filters.append(f"highpass=f={hp}")
         filters.append(f"lowpass=f={lp}")
 
-    # 3. Csúcsáthajlás gátló (hogy ne torzítson recsegősre a magas dB-től)
-    filters.append("alimiter=limit=0.98")
+    # 4. Biztonsági határoló
+    filters.append("alimiter=limit=0.95")
 
     filter_str = ",".join(filters)
 
-    cmd = ["ffmpeg", "-y", "-i", wav_path, "-af", filter_str]
-
     if output_format == "mp3":
-        cmd.extend(["-codec:a", "libmp3lame", "-q:a", "2", output_path])
+        cmd = [
+            "ffmpeg", "-y", 
+            "-i", wav_path, 
+            "-af", filter_str, 
+            "-c:a", "libmp3lame", 
+            "-b:a", "128k", 
+            output_path
+        ]
     else:
         temp_wav = os.path.join(SAVE_DIR, f"temp_{os.path.basename(wav_path)}")
-        cmd.append(temp_wav)
+        cmd = ["ffmpeg", "-y", "-i", wav_path, "-af", filter_str, temp_wav]
 
     try:
-        subprocess.run(cmd, capture_output=True, check=True)
+        print(f"[INFO] FFmpeg parancs futtatása: {' '.join(cmd)}")
+        res = subprocess.run(cmd, capture_output=True, text=True)
         
-        if output_format == "mp3":
-            if os.path.exists(output_path) and os.path.exists(wav_path):
-                os.remove(wav_path) # Nyers WAV törlése
+        # Ha a libmp3lame nem működne, próbálkozunk az általános mp3 kódolóval
+        if res.returncode != 0 and output_format == "mp3":
+            print(f"[FIGYELMEZTETÉS] Primary libmp3lame sikertelen, próbálkozás altípussal... Hiba: {res.stderr}")
+            cmd_fallback = [
+                "ffmpeg", "-y", "-i", wav_path, 
+                "-af", filter_str, "-acodec", "mp3", output_path
+            ]
+            res_fb = subprocess.run(cmd_fallback, capture_output=True, text=True)
+            if res_fb.returncode != 0:
+                print(f"[HIBA] MP3 Fallback is sikertelen: {res_fb.stderr}")
+
+        # Ha létrejött az MP3 fájl, töröljük a nyers WAV-ot
+        if output_format == "mp3" and os.path.exists(output_path):
+            if os.path.exists(wav_path):
+                os.remove(wav_path)
+                print(f"[SIKER] WAV törölve, kimenet: {output_filename}")
             last_processed_file = output_filename
         else:
             if os.path.exists(temp_wav):
@@ -253,7 +278,7 @@ def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_forma
             last_processed_file = os.path.basename(wav_path)
 
     except Exception as e:
-        print(f"FFmpeg feldolgozási hiba: {e}")
+        print(f"[KIVÉTEL HIBA] FFmpeg feldolgozási hiba: {e}")
         last_processed_file = os.path.basename(wav_path)
 
 @app.route('/')
@@ -289,7 +314,7 @@ def start_recording():
         current_wav_file = os.path.join(SAVE_DIR, f"rec_{now_str}.wav")
         recording_start_time = int(time.time())
 
-        # Rögzítés 48kHz monó beállítással a jobb mikrofon kompatibilitásért
+        # 48kHz mintavétel az ALSA közvetlen eléréshez
         cmd = ["arecord", "-D", "plughw:0,0", "-f", "S16_LE", "-r", "48000", "-c", "1", current_wav_file]
         try:
             recording_process = subprocess.Popen(cmd, stderr=subprocess.PIPE)
@@ -335,12 +360,10 @@ def stop_recording():
         recording_start_time = None
 
         if current_wav_file and os.path.exists(current_wav_file):
-            # A feldolgozás most szinkron szálon fut le közvetlenül
-            process_thread = threading.Thread(
+            threading.Thread(
                 target=process_audio_file,
                 args=(current_wav_file, gain, filter_enabled, strength, output_format)
-            )
-            process_thread.start()
+            ).start()
 
         return jsonify({"status": "stopped"})
 

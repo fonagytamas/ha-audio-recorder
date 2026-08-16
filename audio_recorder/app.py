@@ -61,23 +61,23 @@ HTML_TEMPLATE = """
 
     <div class="control-group">
         <label for="gain">Utólagos Hangerő Kiemelés (Gain): <span id="gainVal">0</span> dB</label>
-        <input type="range" id="gain" min="0" max="30" value="0" oninput="document.getElementById('gainVal').innerText=this.value">
+        <input type="range" id="gain" min="0" max="30" value="0" oninput="updateControl('gain', this.value); document.getElementById('gainVal').innerText=this.value">
     </div>
 
     <div class="control-group">
         <label>
-            <input type="checkbox" id="filter" checked> Intelligens Zajszűrés Be
+            <input type="checkbox" id="filter" checked onchange="updateControl('filter', this.checked)"> Intelligens Zajszűrés Be
         </label>
     </div>
 
     <div class="control-group">
         <label for="strength">Zajszűrés Erőssége: <span id="strengthVal">50</span>%</label>
-        <input type="range" id="strength" min="10" max="100" value="50" oninput="document.getElementById('strengthVal').innerText=this.value">
+        <input type="range" id="strength" min="10" max="100" value="50" oninput="updateControl('strength', this.value); document.getElementById('strengthVal').innerText=this.value">
     </div>
 
     <div class="control-group">
         <label for="format">Kimeneti Formátum:</label>
-        <select id="format" style="padding: 8px; border-radius: 5px; background: #333; color: white; border: 1px solid #555;">
+        <select id="format" onchange="updateControl('format', this.value)" style="padding: 8px; border-radius: 5px; background: #333; color: white; border: 1px solid #555;">
             <option value="mp3" selected>MP3</option>
             <option value="wav">WAV</option>
         </select>
@@ -95,12 +95,14 @@ HTML_TEMPLATE = """
 
 <script>
     let timerInterval = null;
-    let initialSeconds = 0;
 
     const basePath = window.location.pathname.replace(/\/$/, '');
 
     window.addEventListener('DOMContentLoaded', () => {
-        // Hangerő lekérése
+        // Helyi beállítások betöltése
+        loadSavedControls();
+
+        // Hangerő lekérése a szervertől (amixer)
         fetch(basePath + '/get_mic_volume')
             .then(res => res.json())
             .then(data => {
@@ -114,6 +116,30 @@ HTML_TEMPLATE = """
         // Állapot ellenőrzése újranyitáskor
         checkStatus();
     });
+
+    function updateControl(key, value) {
+        localStorage.setItem('jarvis_' + key, value);
+    }
+
+    function loadSavedControls() {
+        if (localStorage.getItem('jarvis_gain') !== null) {
+            const gainVal = localStorage.getItem('jarvis_gain');
+            document.getElementById('gain').value = gainVal;
+            document.getElementById('gainVal').innerText = gainVal;
+        }
+        if (localStorage.getItem('jarvis_filter') !== null) {
+            const filterVal = localStorage.getItem('jarvis_filter') === 'true';
+            document.getElementById('filter').checked = filterVal;
+        }
+        if (localStorage.getItem('jarvis_strength') !== null) {
+            const strVal = localStorage.getItem('jarvis_strength');
+            document.getElementById('strength').value = strVal;
+            document.getElementById('strengthVal').innerText = strVal;
+        }
+        if (localStorage.getItem('jarvis_format') !== null) {
+            document.getElementById('format').value = localStorage.getItem('jarvis_format');
+        }
+    }
 
     function checkStatus() {
         fetch(basePath + '/status')

@@ -8,7 +8,10 @@ app = Flask(__name__)
 
 # Mappák beállítása
 SAVE_DIR = "/media/jarvis_recordings"
-os.makedirs(SAVE_DIR, exist_ok=True)
+try:
+    os.makedirs(SAVE_DIR, exist_ok=True)
+except Exception as e:
+    print(f"[FIGYELMEZTETÉS] Nem sikerült létrehozni a SAVE_DIR mappát: {e}")
 
 # Globális állapotváltozók
 recording_process = None
@@ -40,7 +43,7 @@ HTML_TEMPLATE = """
         .btn-stop:disabled { background: #555; cursor: not-allowed; }
         .btn-group { display: flex; justify-content: space-between; margin-top: 15px; }
         audio { width: 100%; margin-top: 20px; display: block; }
-        .status { text-align: center; margin-top: 15px; font-style: italic; color: #aaa; }
+        .status { text-align: center; margin-top: 15px; font-style: italic; color: #aaa; word-break: break-all; }
     </style>
 </head>
 <body>
@@ -48,22 +51,18 @@ HTML_TEMPLATE = """
 <div class="card">
     <h2>JARVIS Felvétel Vezérlő</h2>
 
-    <!-- IDŐSZÁMLÁLÓ -->
     <div class="timer" id="timer">00:00</div>
 
-    <!-- MIKROFON BEMENETI HANGERŐ -->
     <div class="control-group">
         <label for="micVol">Mikrofon Bemeneti Hangerő: <span id="micVolVal">80</span>%</label>
         <input type="range" id="micVol" min="0" max="100" value="80" oninput="updateMicVolume(this.value)">
     </div>
 
-    <!-- UTÓFELDOLGOZÁSI GAIN -->
     <div class="control-group">
         <label for="gain">Utólagos Hangerő Kiemelés (Gain): <span id="gainVal">0</span> dB</label>
         <input type="range" id="gain" min="0" max="30" value="0" oninput="document.getElementById('gainVal').innerText=this.value">
     </div>
 
-    <!-- ZAJSZŰRÉS -->
     <div class="control-group">
         <label>
             <input type="checkbox" id="filter" checked> Intelligens Zajszűrés Be
@@ -75,7 +74,6 @@ HTML_TEMPLATE = """
         <input type="range" id="strength" min="10" max="100" value="50" oninput="document.getElementById('strengthVal').innerText=this.value">
     </div>
 
-    <!-- FORMÁTUM -->
     <div class="control-group">
         <label for="format">Kimeneti Formátum:</label>
         <select id="format" style="padding: 8px; border-radius: 5px; background: #333; color: white; border: 1px solid #555;">
@@ -84,7 +82,6 @@ HTML_TEMPLATE = """
         </select>
     </div>
 
-    <!-- GOMBOK -->
     <div class="btn-group">
         <button class="btn-start" id="startBtn" onclick="startRecording()">Indítás</button>
         <button class="btn-stop" id="stopBtn" onclick="stopRecording()" disabled>Leállítás</button>
@@ -92,7 +89,6 @@ HTML_TEMPLATE = """
 
     <div class="status" id="statusText">Készenlétben...</div>
 
-    <!-- VISSZAJÁTSZÓ LEJÁTSZÓ -->
     <audio id="audioPlayer" controls></audio>
 </div>
 
@@ -109,7 +105,7 @@ HTML_TEMPLATE = """
                     document.getElementById('micVolVal').innerText = data.volume;
                 }
             })
-            .catch(err => console.error("Hiba a mikrofon hangerő lekérésekor:", err));
+            .catch(err => console.error("Hiba a hangerő lekérésekor:", err));
     });
 
     function updateMicVolume(val) {
@@ -138,9 +134,16 @@ HTML_TEMPLATE = """
     }
 
     function startRecording() {
-        document.getElementById('statusText').innerText = "Felvétel indítása...";
+        document.getElementById('statusText').innerText = "Indítás folyamatban...";
         fetch('/start', { method: 'POST' })
-            .then(res => res.json())
+            .then(async res => {
+                const text = await res.text();
+                try {
+                    return JSON.parse(text);
+                } catch (e) {
+                    throw new Error("Szerver hiba (HTML válasz): " + text.substring(0, 100));
+                }
+            })
             .then(data => {
                 if (data.status === 'success') {
                     document.getElementById('statusText').innerText = "Felvétel folyamatban...";
@@ -152,7 +155,7 @@ HTML_TEMPLATE = """
                 }
             })
             .catch(err => {
-                document.getElementById('statusText').innerText = "Hálózati hiba az indításkor.";
+                document.getElementById('statusText').innerText = "Hiba: " + err.message;
             });
     }
 
@@ -307,18 +310,30 @@ def start_recording():
     if recording_process is not None:
         return jsonify({"status": "error", "message": "A felvétel már folyamatban van!"})
 
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    current_wav_file = os.path.join(SAVE_DIR, f"rec_{timestamp}.wav")
-
-    cmd = ["arecord", "-D", "default", "-f", "cd", "-t", "wav", current_wav_file]
-    
     try:
-        recording_process = subprocess.Popen(cmd)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        current_wav_file = os.path.join(SAVE_DIR, f"rec_{timestamp}.wav")
+
+        cmd = ["arecord", "-D", "default", "-f", "cd", "-t", "wav", current_wav_file]
+        print(f"[INFO] Parancs indítása: {' '.join(cmd)}")
+        
+        recording_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        time.sleep(0.2)
+        if recording_process.poll() is not None:
+            _, stderr = recording_process.communicate()
+            err_msg = stderr.decode('utf-8', errors='ignore') or "Ismeretlen arecord hiba"
+            recording_process = None
+            current_wav_file = None
+            print(f"[HIBA] Arecord nem tudott elindulni: {err_msg}")
+            return jsonify({"status": "error", "message": f"Arecord hiba: {err_msg}"})
+
         print(f"[INFO] Felvétel elindítva: {current_wav_file}")
         return jsonify({"status": "success", "file": current_wav_file})
     except Exception as e:
         recording_process = None
         current_wav_file = None
+        print(f"[KIVÉTEL HIBA START] {str(e)}")
         return jsonify({"status": "error", "message": str(e)})
 
 

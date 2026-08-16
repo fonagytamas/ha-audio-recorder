@@ -96,8 +96,11 @@ HTML_TEMPLATE = """
     let timerInterval = null;
     let seconds = 0;
 
+    // Ingress elérési út felderítése
+    const basePath = window.location.pathname.replace(/\\/$/, '');
+
     window.addEventListener('DOMContentLoaded', () => {
-        fetch('/get_mic_volume')
+        fetch(basePath + '/get_mic_volume')
             .then(res => res.json())
             .then(data => {
                 if (data.status === 'success') {
@@ -110,7 +113,7 @@ HTML_TEMPLATE = """
 
     function updateMicVolume(val) {
         document.getElementById('micVolVal').innerText = val;
-        fetch('/set_mic_volume', {
+        fetch(basePath + '/set_mic_volume', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ volume: parseInt(val) })
@@ -135,7 +138,7 @@ HTML_TEMPLATE = """
 
     function startRecording() {
         document.getElementById('statusText').innerText = "Indítás folyamatban...";
-        fetch('/start', { method: 'POST' })
+        fetch(basePath + '/start', { method: 'POST' })
             .then(async res => {
                 const text = await res.text();
                 try {
@@ -172,7 +175,7 @@ HTML_TEMPLATE = """
             format: document.getElementById('format').value
         };
 
-        fetch('/stop', {
+        fetch(basePath + '/stop', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -182,7 +185,7 @@ HTML_TEMPLATE = """
             if (data.status === 'success') {
                 document.getElementById('statusText').innerText = "Kész: " + data.file;
                 const player = document.getElementById('audioPlayer');
-                player.src = '/recordings/' + data.file + '?t=' + new Date().getTime();
+                player.src = basePath + '/recordings/' + data.file + '?t=' + new Date().getTime();
                 player.play();
             } else {
                 document.getElementById('statusText').innerText = "Hiba: " + data.message;

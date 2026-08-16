@@ -96,7 +96,7 @@ HTML_TEMPLATE = """
     let timerInterval = null;
     let seconds = 0;
 
-    // Home Assistant Ingress elérési út támogatása
+    // Ingress elérési út felderítése
     const basePath = window.location.pathname.replace(/\\/$/, '');
 
     window.addEventListener('DOMContentLoaded', () => {
@@ -144,7 +144,7 @@ HTML_TEMPLATE = """
                 try {
                     return JSON.parse(text);
                 } catch (e) {
-                    throw new Error("Szerver hiba: " + text.substring(0, 100));
+                    throw new Error("Szerver hiba (HTML válasz): " + text.substring(0, 100));
                 }
             })
             .then(data => {

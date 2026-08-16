@@ -16,7 +16,7 @@ current_wav_file = None
 last_processed_file = None
 
 # =========================================================
-# BEÉPÍTETT HTML FELÜLET (NINCS SZÜKSÉG KÜLÖN FÁJLRA)
+# BEÉPÍTETT HTML FELÜLET
 # =========================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -28,15 +28,18 @@ HTML_TEMPLATE = """
     <style>
         body { font-family: Arial, sans-serif; margin: 30px; background: #121212; color: #fff; }
         .card { background: #1e1e1e; padding: 20px; border-radius: 10px; max-width: 500px; margin: 0 auto; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
-        h2 { text-align: center; color: #00adb5; }
-        .control-group { margin-bottom: 20px; }
-        label { display: block; margin-bottom: 8px; font-weight: bold; }
-        input[type=range] { width: 100%; }
+        h2 { text-align: center; color: #00adb5; margin-bottom: 10px; }
+        .timer { text-align: center; font-size: 32px; font-weight: bold; color: #ff4757; margin: 15px 0; font-family: monospace; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input[type=range], select { width: 100%; box-sizing: border-box; }
         button { width: 48%; padding: 12px; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; font-weight: bold; }
         .btn-start { background: #28a745; color: white; }
+        .btn-start:disabled { background: #555; cursor: not-allowed; }
         .btn-stop { background: #dc3545; color: white; }
-        .btn-group { display: flex; justify-content: space-between; margin-top: 20px; }
-        audio { width: 100%; margin-top: 20px; }
+        .btn-stop:disabled { background: #555; cursor: not-allowed; }
+        .btn-group { display: flex; justify-content: space-between; margin-top: 15px; }
+        audio { width: 100%; margin-top: 20px; display: block; }
         .status { text-align: center; margin-top: 15px; font-style: italic; color: #aaa; }
     </style>
 </head>
@@ -44,6 +47,9 @@ HTML_TEMPLATE = """
 
 <div class="card">
     <h2>JARVIS Felvétel Vezérlő</h2>
+
+    <!-- IDŐSZÁMLÁLÓ -->
+    <div class="timer" id="timer">00:00</div>
 
     <!-- MIKROFON BEMENETI HANGERŐ -->
     <div class="control-group">
@@ -72,7 +78,7 @@ HTML_TEMPLATE = """
     <!-- FORMÁTUM -->
     <div class="control-group">
         <label for="format">Kimeneti Formátum:</label>
-        <select id="format" style="width: 100%; padding: 8px; border-radius: 5px; background: #333; color: white;">
+        <select id="format" style="padding: 8px; border-radius: 5px; background: #333; color: white; border: 1px solid #555;">
             <option value="mp3" selected>MP3</option>
             <option value="wav">WAV</option>
         </select>
@@ -80,17 +86,20 @@ HTML_TEMPLATE = """
 
     <!-- GOMBOK -->
     <div class="btn-group">
-        <button class="btn-start" onclick="startRecording()">Indítás</button>
-        <button class="btn-stop" onclick="stopRecording()">Leállítás</button>
+        <button class="btn-start" id="startBtn" onclick="startRecording()">Indítás</button>
+        <button class="btn-stop" id="stopBtn" onclick="stopRecording()" disabled>Leállítás</button>
     </div>
 
     <div class="status" id="statusText">Készenlétben...</div>
 
-    <!-- LEJÁTSZÓ -->
-    <audio id="audioPlayer" controls style="display:none;"></audio>
+    <!-- VISSZAJÁTSZÓ LEJÁTSZÓ -->
+    <audio id="audioPlayer" controls></audio>
 </div>
 
 <script>
+    let timerInterval = null;
+    let seconds = 0;
+
     window.addEventListener('DOMContentLoaded', () => {
         fetch('/get_mic_volume')
             .then(res => res.json())
@@ -99,7 +108,8 @@ HTML_TEMPLATE = """
                     document.getElementById('micVol').value = data.volume;
                     document.getElementById('micVolVal').innerText = data.volume;
                 }
-            });
+            })
+            .catch(err => console.error("Hiba a mikrofon hangerő lekérésekor:", err));
     });
 
     function updateMicVolume(val) {
@@ -111,13 +121,46 @@ HTML_TEMPLATE = """
         });
     }
 
+    function startTimer() {
+        seconds = 0;
+        document.getElementById('timer').innerText = "00:00";
+        clearInterval(timerInterval);
+        timerInterval = setInterval(() => {
+            seconds++;
+            const mins = String(Math.floor(seconds / 60)).padStart(2, '0');
+            const secs = String(seconds % 60).padStart(2, '0');
+            document.getElementById('timer').innerText = `${mins}:${secs}`;
+        }, 1000);
+    }
+
+    function stopTimer() {
+        clearInterval(timerInterval);
+    }
+
     function startRecording() {
-        document.getElementById('statusText').innerText = "Felvétel folyamatban...";
-        fetch('/start', { method: 'POST' });
+        document.getElementById('statusText').innerText = "Felvétel indítása...";
+        fetch('/start', { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    document.getElementById('statusText').innerText = "Felvétel folyamatban...";
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                    startTimer();
+                } else {
+                    document.getElementById('statusText').innerText = "Hiba: " + data.message;
+                }
+            })
+            .catch(err => {
+                document.getElementById('statusText').innerText = "Hálózati hiba az indításkor.";
+            });
     }
 
     function stopRecording() {
+        stopTimer();
         document.getElementById('statusText').innerText = "Feldolgozás és zajszűrés (FFmpeg)...";
+        document.getElementById('startBtn').disabled = false;
+        document.getElementById('stopBtn').disabled = true;
 
         const payload = {
             gain: parseFloat(document.getElementById('gain').value),
@@ -137,11 +180,13 @@ HTML_TEMPLATE = """
                 document.getElementById('statusText').innerText = "Kész: " + data.file;
                 const player = document.getElementById('audioPlayer');
                 player.src = '/recordings/' + data.file + '?t=' + new Date().getTime();
-                player.style.display = 'block';
                 player.play();
             } else {
                 document.getElementById('statusText').innerText = "Hiba: " + data.message;
             }
+        })
+        .catch(err => {
+            document.getElementById('statusText').innerText = "Hálózati hiba a feldolgozáskor.";
         });
     }
 </script>
@@ -149,7 +194,6 @@ HTML_TEMPLATE = """
 </body>
 </html>
 """
-
 
 def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_format):
     global last_processed_file

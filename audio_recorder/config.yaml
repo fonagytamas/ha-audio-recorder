@@ -1,6 +1,6 @@
 name: Sajat Hangrogzito
 description: Szerver oldali mikrofon rogzito
-version: 2.0.2
+version: 2.0.3
 slug: audio_recorder
 init: false
 arch:

@@ -6,8 +6,10 @@ from flask import Flask, render_template_string, request, jsonify, send_from_dir
 
 app = Flask(__name__)
 
-# Mappák beállítása
-SAVE_DIR = "/media/jarvis_recordings"
+# Mappák beállítása - Modosítva a www/recordings mappára
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SAVE_DIR = os.path.join(BASE_DIR, "www", "recordings")
+
 try:
     os.makedirs(SAVE_DIR, exist_ok=True)
 except Exception as e:

@@ -112,7 +112,7 @@ HTML_CODE = """
 
     async function checkStatus() {
         try {
-            const res = await fetch('status');
+            const res = await fetch('./status');
             const data = await res.json();
             
             if (data.is_recording) {
@@ -137,10 +137,10 @@ HTML_CODE = """
             }
 
             if (data.last_error) {
-                document.getElementById('logBox').innerText = "Hiba részletei:\n" + data.last_error;
+                document.getElementById('logBox').innerText = "Hiba:\n" + data.last_error;
             }
         } catch (err) {
-            console.error("Státusz ellenőrzési hiba", err);
+            console.error("Státusz hiba", err);
         }
     }
 
@@ -151,7 +151,7 @@ HTML_CODE = """
         document.getElementById('logBox').innerText = "";
         
         try {
-            const res = await fetch('start', { method: 'POST' });
+            const res = await fetch('./start', { method: 'POST' });
             const data = await res.json();
             if (data.status === 'ok') {
                 checkStatus();
@@ -162,6 +162,7 @@ HTML_CODE = """
             }
         } catch (err) {
             document.getElementById('status').innerText = "❌ Hálózati hiba!";
+            document.getElementById('logBox').innerText = err.toString();
             document.getElementById('recBtn').disabled = false;
         }
     }
@@ -179,7 +180,7 @@ HTML_CODE = """
         };
 
         try {
-            const res = await fetch('stop', {
+            const res = await fetch('./stop', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -200,11 +201,11 @@ HTML_CODE = """
 
     async function loadPlayer() {
         try {
-            const res = await fetch('latest');
+            const res = await fetch('./latest');
             const data = await res.json();
             if (data.file) {
                 const player = document.getElementById('audioPlayer');
-                player.src = "/recordings_file/" + data.file + "?t=" + new Date().getTime();
+                player.src = "./recordings_file/" + data.file + "?t=" + new Date().getTime();
                 document.getElementById('playerBox').style.display = "block";
                 document.getElementById('status').innerText = "💾 Mentve! Hallgasd meg alább:";
             }
@@ -298,7 +299,6 @@ def start_recording():
     ensure_dir_exists()
     last_error_log = ""
 
-    # Kényszerített tisztítás: ha maradt elakadt folyamat, leállítjuk
     if recording_process is not None and recording_process.poll() is None:
         try:
             recording_process.kill()

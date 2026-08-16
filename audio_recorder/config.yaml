@@ -1,6 +1,6 @@
-name: Sajat Hangrogzito
-description: Szerver oldali mikrofon rogzito
-version: 2.0.3
+name: JARVIS Education
+description: Szerver oldali mikrofon rögzítő és hangfeldolgozó
+version: 2.0.4
 slug: audio_recorder
 init: false
 arch:
@@ -19,5 +19,5 @@ map:
   - config:rw
 ingress: true
 ingress_port: 8099
-panel_title: Hangrogzito
+panel_title: JARVIS Education
 panel_icon: mdi:microphone

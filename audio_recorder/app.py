@@ -54,8 +54,8 @@ HTML_CODE = """
     <h3>JARVIS Education</h3>
     
     <div class="control-group">
-        <label>Hangerő kiemelés (Gain Boost) <span class="slider-val" id="gainVal">+10 dB</span></label>
-        <input type="range" id="gainBoost" min="0" max="24" value="10" oninput="document.getElementById('gainVal').innerText = '+' + this.value + ' dB'">
+        <label>Hangerő kiemelés (Gain Boost) <span class="slider-val" id="gainVal">+30 dB</span></label>
+        <input type="range" id="gainBoost" min="0" max="60" value="30" oninput="document.getElementById('gainVal').innerText = '+' + this.value + ' dB'">
     </div>
 
     <div class="control-group">
@@ -153,7 +153,7 @@ HTML_CODE = """
     }
 
     async function stopRec() {
-        document.getElementById('status').innerText = "⏳ Tisztítás és feldolgozás...";
+        document.getElementById('status').innerText = "⏳ Tisztítás és átalakítás...";
         document.getElementById('recBtn').disabled = true;
         document.getElementById('stopBtn').disabled = true;
 
@@ -173,7 +173,7 @@ HTML_CODE = """
             const data = await res.json();
             if (data.status === 'stopped') {
                 document.getElementById('status').innerText = "💾 Mentve! (" + payload.format.toUpperCase() + ")";
-                setTimeout(loadPlayer, 2000);
+                setTimeout(loadPlayer, 2500);
             } else {
                 document.getElementById('status').innerText = "⚠️ Leállítva.";
             }
@@ -210,42 +210,48 @@ def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_forma
     if not os.path.exists(wav_path):
         return
 
-    output_filename = os.path.basename(wav_path).replace(".wav", f".{output_format}")
+    base_name = os.path.splitext(os.path.basename(wav_path))[0]
+    output_filename = f"{base_name}.{output_format}"
     output_path = os.path.join(SAVE_DIR, output_filename)
 
     filters = []
 
+    # 1. Drasztikus hangerő kiemelés (Gain Boost)
     if gain_db > 0:
         filters.append(f"volume={gain_db}dB")
 
+    # 2. Zajszűrés és beszéd frekvenciatartomány szűrése
     if filter_enabled:
-        hp = int(40 + (strength / 100.0) * 200)
-        lp = int(12000 - (strength / 100.0) * 8000)
+        hp = int(60 + (strength / 100.0) * 140)
+        lp = int(10000 - (strength / 100.0) * 5000)
         filters.append(f"highpass=f={hp}")
         filters.append(f"lowpass=f={lp}")
 
-    filters.append("compand=attacks=0.02:decays=0.2:points=-80/-80|-45/-20|-10/-6|0/0")
-    filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+    # 3. Csúcsáthajlás gátló (hogy ne torzítson recsegősre a magas dB-től)
+    filters.append("alimiter=limit=0.98")
 
     filter_str = ",".join(filters)
 
     cmd = ["ffmpeg", "-y", "-i", wav_path, "-af", filter_str]
 
     if output_format == "mp3":
-        cmd.extend(["-b:a", "128k", output_path])
+        cmd.extend(["-codec:a", "libmp3lame", "-q:a", "2", output_path])
     else:
-        temp_wav = os.path.join(SAVE_DIR, f"clean_{os.path.basename(wav_path)}")
+        temp_wav = os.path.join(SAVE_DIR, f"temp_{os.path.basename(wav_path)}")
         cmd.append(temp_wav)
 
     try:
         subprocess.run(cmd, capture_output=True, check=True)
-        if output_format == "wav" and os.path.exists(temp_wav):
-            os.replace(temp_wav, wav_path)
-        elif output_format == "mp3" and os.path.exists(output_path):
-            if os.path.exists(wav_path):
-                os.remove(wav_path)
         
-        last_processed_file = output_filename
+        if output_format == "mp3":
+            if os.path.exists(output_path) and os.path.exists(wav_path):
+                os.remove(wav_path) # Nyers WAV törlése
+            last_processed_file = output_filename
+        else:
+            if os.path.exists(temp_wav):
+                os.replace(temp_wav, wav_path)
+            last_processed_file = os.path.basename(wav_path)
+
     except Exception as e:
         print(f"FFmpeg feldolgozási hiba: {e}")
         last_processed_file = os.path.basename(wav_path)
@@ -283,13 +289,14 @@ def start_recording():
         current_wav_file = os.path.join(SAVE_DIR, f"rec_{now_str}.wav")
         recording_start_time = int(time.time())
 
-        cmd = ["arecord", "-D", "plughw:0,0", "-f", "S16_LE", "-r", "44100", "-c", "1", current_wav_file]
+        # Rögzítés 48kHz monó beállítással a jobb mikrofon kompatibilitásért
+        cmd = ["arecord", "-D", "plughw:0,0", "-f", "S16_LE", "-r", "48000", "-c", "1", current_wav_file]
         try:
             recording_process = subprocess.Popen(cmd, stderr=subprocess.PIPE)
             time.sleep(0.5)
             
             if recording_process.poll() is not None:
-                cmd_fb = ["arecord", "-f", "S16_LE", "-r", "44100", "-c", "1", current_wav_file]
+                cmd_fb = ["arecord", "-f", "S16_LE", "-r", "48000", "-c", "1", current_wav_file]
                 recording_process = subprocess.Popen(cmd_fb, stderr=subprocess.PIPE)
                 time.sleep(0.5)
                 
@@ -312,7 +319,7 @@ def stop_recording():
     global recording_process, current_wav_file, recording_start_time
     data = request.get_json() or {}
     
-    gain = data.get('gain', 10)
+    gain = data.get('gain', 30)
     filter_enabled = data.get('filter', True)
     strength = data.get('strength', 50)
     output_format = data.get('format', 'mp3')
@@ -328,10 +335,12 @@ def stop_recording():
         recording_start_time = None
 
         if current_wav_file and os.path.exists(current_wav_file):
-            threading.Thread(
+            # A feldolgozás most szinkron szálon fut le közvetlenül
+            process_thread = threading.Thread(
                 target=process_audio_file,
                 args=(current_wav_file, gain, filter_enabled, strength, output_format)
-            ).start()
+            )
+            process_thread.start()
 
         return jsonify({"status": "stopped"})
 

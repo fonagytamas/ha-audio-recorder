@@ -2,7 +2,7 @@ import os
 import subprocess
 import time
 import re
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template_string, request, jsonify, send_from_directory
 
 app = Flask(__name__)
 
@@ -15,11 +15,143 @@ recording_process = None
 current_wav_file = None
 last_processed_file = None
 
+# =========================================================
+# BEÉPÍTETT HTML FELÜLET (NINCS SZÜKSÉG KÜLÖN FÁJLRA)
+# =========================================================
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JARVIS Rögzítő & Hangkezelő</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 30px; background: #121212; color: #fff; }
+        .card { background: #1e1e1e; padding: 20px; border-radius: 10px; max-width: 500px; margin: 0 auto; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        h2 { text-align: center; color: #00adb5; }
+        .control-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 8px; font-weight: bold; }
+        input[type=range] { width: 100%; }
+        button { width: 48%; padding: 12px; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; font-weight: bold; }
+        .btn-start { background: #28a745; color: white; }
+        .btn-stop { background: #dc3545; color: white; }
+        .btn-group { display: flex; justify-content: space-between; margin-top: 20px; }
+        audio { width: 100%; margin-top: 20px; }
+        .status { text-align: center; margin-top: 15px; font-style: italic; color: #aaa; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2>JARVIS Felvétel Vezérlő</h2>
+
+    <!-- MIKROFON BEMENETI HANGERŐ -->
+    <div class="control-group">
+        <label for="micVol">Mikrofon Bemeneti Hangerő: <span id="micVolVal">80</span>%</label>
+        <input type="range" id="micVol" min="0" max="100" value="80" oninput="updateMicVolume(this.value)">
+    </div>
+
+    <!-- UTÓFELDOLGOZÁSI GAIN -->
+    <div class="control-group">
+        <label for="gain">Utólagos Hangerő Kiemelés (Gain): <span id="gainVal">0</span> dB</label>
+        <input type="range" id="gain" min="0" max="30" value="0" oninput="document.getElementById('gainVal').innerText=this.value">
+    </div>
+
+    <!-- ZAJSZŰRÉS -->
+    <div class="control-group">
+        <label>
+            <input type="checkbox" id="filter" checked> Intelligens Zajszűrés Be
+        </label>
+    </div>
+
+    <div class="control-group">
+        <label for="strength">Zajszűrés Erőssége: <span id="strengthVal">50</span>%</label>
+        <input type="range" id="strength" min="10" max="100" value="50" oninput="document.getElementById('strengthVal').innerText=this.value">
+    </div>
+
+    <!-- FORMÁTUM -->
+    <div class="control-group">
+        <label for="format">Kimeneti Formátum:</label>
+        <select id="format" style="width: 100%; padding: 8px; border-radius: 5px; background: #333; color: white;">
+            <option value="mp3" selected>MP3</option>
+            <option value="wav">WAV</option>
+        </select>
+    </div>
+
+    <!-- GOMBOK -->
+    <div class="btn-group">
+        <button class="btn-start" onclick="startRecording()">Indítás</button>
+        <button class="btn-stop" onclick="stopRecording()">Leállítás</button>
+    </div>
+
+    <div class="status" id="statusText">Készenlétben...</div>
+
+    <!-- LEJÁTSZÓ -->
+    <audio id="audioPlayer" controls style="display:none;"></audio>
+</div>
+
+<script>
+    window.addEventListener('DOMContentLoaded', () => {
+        fetch('/get_mic_volume')
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    document.getElementById('micVol').value = data.volume;
+                    document.getElementById('micVolVal').innerText = data.volume;
+                }
+            });
+    });
+
+    function updateMicVolume(val) {
+        document.getElementById('micVolVal').innerText = val;
+        fetch('/set_mic_volume', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ volume: parseInt(val) })
+        });
+    }
+
+    function startRecording() {
+        document.getElementById('statusText').innerText = "Felvétel folyamatban...";
+        fetch('/start', { method: 'POST' });
+    }
+
+    function stopRecording() {
+        document.getElementById('statusText').innerText = "Feldolgozás és zajszűrés (FFmpeg)...";
+
+        const payload = {
+            gain: parseFloat(document.getElementById('gain').value),
+            filter: document.getElementById('filter').checked,
+            strength: parseFloat(document.getElementById('strength').value),
+            format: document.getElementById('format').value
+        };
+
+        fetch('/stop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.status === 'success') {
+                document.getElementById('statusText').innerText = "Kész: " + data.file;
+                const player = document.getElementById('audioPlayer');
+                player.src = '/recordings/' + data.file + '?t=' + new Date().getTime();
+                player.style.display = 'block';
+                player.play();
+            } else {
+                document.getElementById('statusText').innerText = "Hiba: " + data.message;
+            }
+        });
+    }
+</script>
+
+</body>
+</html>
+"""
+
 
 def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_format):
-    """
-    Feldolgozza a nyers WAV fájlt: zajszűrés, hangerő-kiemelés, normálás és MP3/WAV mentés.
-    """
     global last_processed_file
     if not os.path.exists(wav_path):
         print(f"[HIBA] Nem található a WAV fájl: {wav_path}")
@@ -32,30 +164,19 @@ def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_forma
 
     filters = []
 
-    # =========================================================
-    # 1. ZAJSZŰRÉS (A HANGERŐ-KIEMELÉS ELŐTT)
-    # =========================================================
     if filter_enabled:
-        # FFT alapú intelligens zajcsökkentés (afftdn)
         nr_db = int(12 + (strength / 100.0) * 28)
         filters.append(f"afftdn=nr={nr_db}:nf=-50")
 
-        # Beszédtartomány megtartása (Mély zúgás és magas sípolás vágása)
-        hp = int(80 + (strength / 100.0) * 120)      # 80Hz - 200Hz alatti mély zúgás vágása
-        lp = int(8000 - (strength / 100.0) * 3500)   # 8000Hz - 4500Hz feletti sípolás vágása
+        hp = int(80 + (strength / 100.0) * 120)
+        lp = int(8000 - (strength / 100.0) * 3500)
         filters.append(f"highpass=f={hp}")
         filters.append(f"lowpass=f={lp}")
 
-    # =========================================================
-    # 2. HANGERŐ-KIEMELÉS ÉS DINAMIKUS NORMÁLÁS (SZŰRÉS UTÁN)
-    # =========================================================
     if gain_db > 0:
         filters.append(f"volume={gain_db}dB")
 
-    # Dinamikus normálás (már csak a tiszta beszédet erősíti fel)
     filters.append("dynaudnorm=f=150:g=15")
-
-    # Biztonsági határoló (a recsegés/torzítás ellen)
     filters.append("alimiter=limit=0.95")
 
     filter_str = ",".join(filters)
@@ -103,15 +224,11 @@ def process_audio_file(wav_path, gain_db, filter_enabled, strength, output_forma
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template_string(HTML_TEMPLATE)
 
 
-# =========================================================
-# MIKROFON HANGERŐ KEZELÉS (AMIXER)
-# =========================================================
 @app.route("/get_mic_volume", methods=["GET"])
 def get_mic_volume():
-    """Lekéri a mikrofon jelenlegi hangerő-százalékát."""
     try:
         res = subprocess.run(["amixer", "sget", "Capture"], capture_output=True, text=True)
         if res.returncode != 0:
@@ -127,7 +244,6 @@ def get_mic_volume():
 
 @app.route("/set_mic_volume", methods=["POST"])
 def set_mic_volume():
-    """Beállítja a rendszerszintű mikrofon hangerőt (0-100%)."""
     data = request.json or {}
     volume = data.get("volume", 80)
     try:
@@ -141,9 +257,6 @@ def set_mic_volume():
         return jsonify({"status": "error", "message": str(e)})
 
 
-# =========================================================
-# FELVÉTEL KEZELÉS
-# =========================================================
 @app.route("/start", methods=["POST"])
 def start_recording():
     global recording_process, current_wav_file
